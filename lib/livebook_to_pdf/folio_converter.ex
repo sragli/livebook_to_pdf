@@ -17,23 +17,21 @@ defmodule LivebookToPdf.FolioConverter do
   `vega_lite_convert` NIF and attached to the document.
 
   Options:
-    - `:title`  – override the document title (replaces the first H1)
-    - `:author` – author name inserted beneath the title
-    - `:date`   – date string inserted beneath the title
+    - `:title`  - override the document title (replaces the first H1)
+    - `:author` - author name inserted beneath the title
+    - `:date`   - date string inserted beneath the title
   """
   @spec build_document([map()], keyword()) :: {:ok, Folio.Document.t()} | {:error, term()}
   def build_document(blocks, opts \\ []) do
     {markdown, images} = render_blocks(blocks)
     markdown = inject_metadata(markdown, opts)
+    nodes = markdown |> preprocess_math() |> Folio.parse_markdown!()
 
     doc =
-      blocks
-      |> then(fn _ ->
-        Folio.Document.new()
-        |> Folio.Document.add_style(scientific_styles())
-      end)
+      Folio.Document.new()
+      |> Folio.Document.add_style(scientific_styles())
       |> attach_images(images)
-      |> Folio.Document.add_content(markdown)
+      |> Folio.Document.add_content(nodes)
 
     {:ok, doc}
   rescue
@@ -221,7 +219,9 @@ defmodule LivebookToPdf.FolioConverter do
 
   defp replace_or_prepend_h1(body, title) do
     if Regex.match?(~r/^# .+/m, body) do
-      Regex.replace(~r/^# .+/m, body, "# #{title}", global: false)
+      # Replace only the first H1 heading by splitting on the first match.
+      [before | rest] = Regex.split(~r/^# .+/m, body, parts: 2)
+      before <> "# #{title}" <> Enum.join(rest)
     else
       "# #{title}\n\n#{body}"
     end
@@ -248,15 +248,253 @@ defmodule LivebookToPdf.FolioConverter do
   # ── Scientific article styles ─────────────────────────────────────────────────
 
   # A4 paper (595 × 842 pt), comfortable academic margins (~2.5 cm top/bottom,
-  # ~3 cm sides), 11 pt body text, justified paragraphs, numbered sections, and
-  # page numbers.
+  # ~3 cm sides), 11 pt body text, justified paragraphs, and page numbers.
+  # ── LaTeX → Typst math preprocessing ──────────────────────────────────────
+  #
+  # Livebook uses KaTeX (LaTeX) syntax inside $…$ and $$…$$ regions.
+  # Folio/Typst uses its own math syntax, so we convert the most common LaTeX
+  # constructs before handing the markdown to Folio.parse_markdown!.
+
+  defp preprocess_math(markdown) do
+    step1 =
+      Regex.replace(~r/\$\$(?s)(.*?)\$\$/, markdown, fn _, inner ->
+        "$$#{latex_to_typst(inner)}$$"
+      end)
+
+    Regex.replace(~r/\$([^$\n]+)\$/, step1, fn _, inner ->
+      "$#{latex_to_typst(inner)}$"
+    end)
+  end
+
+  defp latex_to_typst(math) do
+    # Regex.replace(regex, subject, replacement) — helpers keep the pipeline readable.
+    r = fn subject, regex, replacement -> Regex.replace(regex, subject, replacement) end
+
+    math
+    # ── Literal braces \{ \} – protect before bare-brace substitution ─────────
+    # Replace \{ / \} with private-use placeholders so they survive the
+    # String.replace("{" → "(") step and are restored as Typst math braces.
+    |> String.replace("\\{", "\u{E000}")
+    |> String.replace("\\}", "\u{E001}")
+    # ── \operatorname(*){…} → upright text ────────────────────────────────────
+    |> r.(~r/\\operatorname\*?\{([^{}]*)\}/, fn _, name ->
+      clean = String.replace(name, "\\,", " ") |> String.trim()
+      "op(\"#{clean}\")"
+    end)
+    # ── Two-argument commands ──────────────────────────────────────────────────
+    |> r.(~r/\\(?:t|d)?frac\{([^{}]*)\}\{([^{}]*)\}/, fn _, a, b ->
+      "frac(#{a}, #{b})"
+    end)
+    |> r.(~r/\\binom\{([^{}]*)\}\{([^{}]*)\}/, fn _, a, b ->
+      "binom(#{a}, #{b})"
+    end)
+    # ── \sqrt with optional root index ────────────────────────────────────────
+    |> r.(~r/\\sqrt\[([^\]]+)\]\{([^{}]*)\}/, fn _, n, x ->
+      "root(#{n}, #{x})"
+    end)
+    |> r.(~r/\\sqrt\{([^{}]*)\}/, fn _, x -> "sqrt(#{x})" end)
+    # ── One-argument font/style commands ──────────────────────────────────────
+    |> r.(~r/\\text\{([^{}]*)\}/, fn _, t -> "\"#{t}\"" end)
+    |> r.(~r/\\mbox\{([^{}]*)\}/, fn _, t -> "\"#{t}\"" end)
+    |> r.(~r/\\mathbf\{([^{}]*)\}/, fn _, x -> "bold(#{x})" end)
+    |> r.(~r/\\(?:boldsymbol|bm)\{([^{}]*)\}/, fn _, x -> "bold(#{x})" end)
+    |> r.(~r/\\mathit\{([^{}]*)\}/, fn _, x -> "italic(#{x})" end)
+    |> r.(~r/\\mathrm\{([^{}]*)\}/, fn _, x -> "upright(#{x})" end)
+    |> r.(~r/\\mathcal\{([^{}]*)\}/, fn _, x -> "cal(#{x})" end)
+    |> r.(~r/\\mathbb\{([^{}]*)\}/, fn _, x -> "bb(#{x})" end)
+    |> r.(~r/\\mathfrak\{([^{}]*)\}/, fn _, x -> "frak(#{x})" end)
+    # ── Accents / decorations ──────────────────────────────────────────────────
+    |> r.(~r/\\(?:wide)?hat\{([^{}]*)\}/, fn _, x -> "hat(#{x})" end)
+    |> r.(~r/\\(?:wide)?tilde\{([^{}]*)\}/, fn _, x -> "tilde(#{x})" end)
+    |> r.(~r/\\vec\{([^{}]*)\}/, fn _, x -> "arrow(#{x})" end)
+    |> r.(~r/\\(?:bar|overline)\{([^{}]*)\}/, fn _, x -> "overline(#{x})" end)
+    |> r.(~r/\\underline\{([^{}]*)\}/, fn _, x -> "underline(#{x})" end)
+    |> r.(~r/\\ddot\{([^{}]*)\}/, fn _, x -> "dot.double(#{x})" end)
+    |> r.(~r/\\dot\{([^{}]*)\}/, fn _, x -> "dot(#{x})" end)
+    |> r.(~r/\\overbrace\{([^{}]*)\}/, fn _, x -> "overbrace(#{x})" end)
+    |> r.(~r/\\underbrace\{([^{}]*)\}/, fn _, x -> "underbrace(#{x})" end)
+    # ── \left / \right size hints → strip ────────────────────────────────────
+    |> r.(~r/\\left\s*\(/, "(")
+    |> r.(~r/\\right\s*\)/, ")")
+    |> r.(~r/\\left\s*\[/, "[")
+    |> r.(~r/\\right\s*\]/, "]")
+    |> r.(~r/\\left\s*\\?\{/, "(")
+    |> r.(~r/\\right\s*\\?\}/, ")")
+    |> r.(~r/\\left\s*\|/, "|")
+    |> r.(~r/\\right\s*\|/, "|")
+    |> r.(~r/\\left\s*\./, "")
+    |> r.(~r/\\right\s*\./, "")
+    # ── Subscripts / superscripts: _{…} → _(…), ^{…} → ^(…) ─────────────────
+    |> r.(~r/_\{([^{}]*)\}/, fn _, c -> "_(#{c})" end)
+    |> r.(~r/\^\{([^{}]*)\}/, fn _, c -> "^(#{c})" end)
+    # ── Remaining bare braces (general grouping) → parens ────────────────────
+    |> String.replace("{", "(")
+    |> String.replace("}", ")")
+    # ── Restore literal math braces from placeholders ─────────────────────────
+    |> String.replace("\u{E000}", "{")
+    |> String.replace("\u{E001}", "}")
+    # ── Named command substitutions ───────────────────────────────────────────
+    |> apply_latex_commands()
+  end
+
+  # Each pair is {latex_command, typst_equivalent}.
+  # The regex engine appends (?![a-zA-Z]) so shorter commands never partially
+  # match longer ones (e.g. \in does not fire inside \infty or \int).
+  @latex_commands [
+    # Integrals (longer forms first)
+    {"\\iiint", "integral.triple"},
+    {"\\iint", "integral.double"},
+    {"\\oint", "integral.cont"},
+    {"\\int", "integral"},
+    # Spacing
+    {"\\,", "thin"},
+    {"\\:", "med"},
+    {"\\;", "thick"},
+    {"\\!", ""},
+    # Greek – variant forms before base forms
+    {"\\varepsilon", "epsilon"},
+    {"\\vartheta", "theta.alt"},
+    {"\\varpi", "pi.alt"},
+    {"\\varrho", "rho.alt"},
+    {"\\varsigma", "sigma.alt"},
+    {"\\varphi", "phi"},
+    {"\\varnothing", "nothing"},
+    {"\\alpha", "alpha"},
+    {"\\beta", "beta"},
+    {"\\gamma", "gamma"},
+    {"\\delta", "delta"},
+    {"\\epsilon", "epsilon"},
+    {"\\zeta", "zeta"},
+    {"\\eta", "eta"},
+    {"\\theta", "theta"},
+    {"\\iota", "iota"},
+    {"\\kappa", "kappa"},
+    {"\\lambda", "lambda"},
+    {"\\mu", "mu"},
+    {"\\nu", "nu"},
+    {"\\xi", "xi"},
+    {"\\pi", "pi"},
+    {"\\rho", "rho"},
+    {"\\sigma", "sigma"},
+    {"\\tau", "tau"},
+    {"\\upsilon", "upsilon"},
+    {"\\phi", "phi.alt"},
+    {"\\chi", "chi"},
+    {"\\psi", "psi"},
+    {"\\omega", "omega"},
+    {"\\Gamma", "Gamma"},
+    {"\\Delta", "Delta"},
+    {"\\Theta", "Theta"},
+    {"\\Lambda", "Lambda"},
+    {"\\Xi", "Xi"},
+    {"\\Pi", "Pi"},
+    {"\\Sigma", "Sigma"},
+    {"\\Upsilon", "Upsilon"},
+    {"\\Phi", "Phi"},
+    {"\\Psi", "Psi"},
+    {"\\Omega", "Omega"},
+    # Symbols
+    {"\\infty", "infinity"},
+    {"\\partial", "partial"},
+    {"\\nabla", "nabla"},
+    {"\\hbar", "planck.reduce"},
+    {"\\ell", "ell"},
+    {"\\emptyset", "nothing"},
+    {"\\pm", "plus.minus"},
+    {"\\mp", "minus.plus"},
+    {"\\times", "times"},
+    {"\\div", "div"},
+    {"\\cdot", "dot.op"},
+    {"\\leq", "lt.eq"},
+    {"\\le", "lt.eq"},
+    {"\\geq", "gt.eq"},
+    {"\\ge", "gt.eq"},
+    {"\\neq", "eq.not"},
+    {"\\ne", "eq.not"},
+    {"\\approx", "approx"},
+    {"\\equiv", "equiv"},
+    {"\\propto", "prop"},
+    {"\\sim", "tilde.op"},
+    {"\\subseteq", "subset.eq"},
+    {"\\subset", "subset"},
+    {"\\supseteq", "supset.eq"},
+    {"\\supset", "supset"},
+    {"\\setminus", "without"},
+    {"\\ll", "lt.double"},
+    {"\\gg", "gt.double"},
+    {"\\mid", "|"},
+    {"\\bigcup", "union.big"},
+    {"\\bigcap", "sect.big"},
+    {"\\cup", "union"},
+    {"\\cap", "sect"},
+    {"\\notin", "in.not"},
+    {"\\in", "in"},
+    {"\\Leftrightarrow", "arrow.l.r.double"},
+    {"\\leftrightarrow", "<->"},
+    {"\\Rightarrow", "=>"},
+    {"\\rightarrow", "->"},
+    {"\\Leftarrow", "arrow.l.double"},
+    {"\\leftarrow", "<-"},
+    {"\\to", "->"},
+    {"\\iff", "arrow.l.r.double"},
+    {"\\implies", "=>"},
+    {"\\forall", "forall"},
+    {"\\exists", "exists"},
+    {"\\neg", "not"},
+    {"\\lnot", "not"},
+    {"\\land", "and"},
+    {"\\wedge", "and"},
+    {"\\lor", "or"},
+    {"\\vee", "or"},
+    {"\\perp", "perp"},
+    {"\\parallel", "parallel"},
+    {"\\ldots", "..."},
+    {"\\cdots", "..."},
+    {"\\dots", "..."},
+    {"\\vdots", "dots.v"},
+    {"\\ddots", "dots.d"},
+    {"\\Re", "Re"},
+    {"\\Im", "Im"},
+    {"\\sum", "sum"},
+    {"\\prod", "product"},
+    # Math functions – Typst renders these upright automatically
+    {"\\arctan", "arctan"},
+    {"\\arccos", "arccos"},
+    {"\\arcsin", "arcsin"},
+    {"\\tanh", "tanh"},
+    {"\\cosh", "cosh"},
+    {"\\sinh", "sinh"},
+    {"\\tan", "tan"},
+    {"\\cos", "cos"},
+    {"\\sin", "sin"},
+    {"\\log", "log"},
+    {"\\ln", "ln"},
+    {"\\exp", "exp"},
+    {"\\lim", "lim"},
+    {"\\max", "max"},
+    {"\\min", "min"},
+    {"\\sup", "sup"},
+    {"\\inf", "inf"},
+    {"\\det", "det"},
+    {"\\dim", "dim"},
+    {"\\ker", "ker"},
+    {"\\gcd", "gcd"},
+    {"\\deg", "deg"}
+  ]
+
+  defp apply_latex_commands(math) do
+    Enum.reduce(@latex_commands, math, fn {latex, typst}, acc ->
+      pattern = Regex.compile!(Regex.escape(latex) <> "(?![a-zA-Z])")
+      Regex.replace(pattern, acc, typst)
+    end)
+  end
+
   defp scientific_styles do
     [
       Folio.Styles.page_size(width: 595, height: 842),
       Folio.Styles.page_margin(top: 71, bottom: 71, left: 85, right: 85),
       Folio.Styles.font_size(11),
       Folio.Styles.par_justify(true),
-      Folio.Styles.heading_numbering("1.1"),
       Folio.Styles.page_numbering("1"),
       Folio.Styles.hyphenate(true)
     ]
