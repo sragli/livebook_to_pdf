@@ -327,6 +327,11 @@ defmodule LivebookToPdf.FolioConverter do
     # ── Subscripts / superscripts: _{…} → _(…), ^{…} → ^(…) ─────────────────
     |> r.(~r/_\{([^{}]*)\}/, fn _, c -> "_(#{c})" end)
     |> r.(~r/\^\{([^{}]*)\}/, fn _, c -> "^(#{c})" end)
+    # ── Bare single-token sub/superscripts: _x → _(x), ^x → ^(x) ────────────
+    # LaTeX bare _x subscripts only the first token; Typst treats consecutive
+    # letters as one identifier and would subscript them all without parens.
+    |> r.(~r/_([a-zA-Z0-9])/, fn _, c -> "_(#{c})" end)
+    |> r.(~r/\^([a-zA-Z0-9])/, fn _, c -> "^(#{c})" end)
     # ── Remaining bare braces (general grouping) → parens ────────────────────
     |> String.replace("{", "(")
     |> String.replace("}", ")")
