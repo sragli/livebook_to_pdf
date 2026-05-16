@@ -489,8 +489,16 @@ defmodule LivebookToPdf.FolioConverter do
 
   defp apply_latex_commands(math) do
     Enum.reduce(@latex_commands, math, fn {latex, typst}, acc ->
-      pattern = Regex.compile!(Regex.escape(latex) <> "(?![a-zA-Z])")
-      Regex.replace(pattern, acc, typst)
+      # Capture an optional preceding alphanumeric character.  When one is
+      # found it means the LaTeX command was written without a separating space
+      # (e.g. `\pi\in` or `x\in`).  After substitution the Typst names would
+      # run together (`piin`), so we reinsert a space between them.
+      pattern = Regex.compile!("([a-zA-Z0-9]?)" <> Regex.escape(latex) <> "(?![a-zA-Z])")
+
+      Regex.replace(pattern, acc, fn
+        _, "" -> typst
+        _, pre -> "#{pre} #{typst}"
+      end)
     end)
   end
 
