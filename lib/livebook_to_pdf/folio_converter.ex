@@ -255,15 +255,29 @@ defmodule LivebookToPdf.FolioConverter do
   # Folio/Typst uses its own math syntax, so we convert the most common LaTeX
   # constructs before handing the markdown to Folio.parse_markdown!.
 
+  # Private-use Unicode sentinels — display-math blocks are wrapped with these
+  # after conversion so the inline-math pass cannot re-match inside them.
+  @disp_open "\u{E010}"
+  @disp_close "\u{E011}"
+
   defp preprocess_math(markdown) do
+    # Step 1 – convert display math $$…$$ and protect with sentinels so the
+    # inline pass cannot accidentally re-match inside an already-converted block.
     step1 =
-      Regex.replace(~r/\$\$(?s)(.*?)\$\$/, markdown, fn _, inner ->
-        "$$#{latex_to_typst(inner)}$$"
+      Regex.replace(~r/\$\$(.*?)\$\$/s, markdown, fn _, inner ->
+        "#{@disp_open}#{latex_to_typst(inner) |> String.trim()}#{@disp_close}"
       end)
 
-    Regex.replace(~r/\$([^$\n]+)\$/, step1, fn _, inner ->
-      "$#{latex_to_typst(inner)}$"
-    end)
+    # Step 2 – convert inline math $…$ (sentinel-wrapped blocks are immune).
+    step2 =
+      Regex.replace(~r/\$(.+?)\$/s, step1, fn _, inner ->
+        "$#{latex_to_typst(inner) |> String.trim()}$"
+      end)
+
+    # Step 3 – restore sentinels to $$.
+    step2
+    |> String.replace(@disp_open, "$$")
+    |> String.replace(@disp_close, "$$")
   end
 
   defp latex_to_typst(math) do
@@ -340,6 +354,8 @@ defmodule LivebookToPdf.FolioConverter do
     |> String.replace("\u{E001}", "}")
     # ── Named command substitutions ───────────────────────────────────────────
     |> apply_latex_commands()
+    # ── Unicode math characters (typed directly, not as LaTeX commands) ────────
+    |> apply_unicode_math_chars()
   end
 
   # Each pair is {latex_command, typst_equivalent}.
@@ -486,6 +502,120 @@ defmodule LivebookToPdf.FolioConverter do
     {"\\gcd", "gcd"},
     {"\\deg", "deg"}
   ]
+
+  # Unicode math characters that may appear verbatim in Livebook markdown.
+  # Pairs are {unicode_char, typst_equivalent}.
+  # Operator replacements include surrounding spaces; alphabetic (Greek) ones do
+  # not — apply_unicode_math_chars adds a space when an alphanumeric precedes.
+  @unicode_math_chars [
+    # Greek lowercase
+    {"α", "alpha"},
+    {"β", "beta"},
+    {"γ", "gamma"},
+    {"δ", "delta"},
+    {"ε", "epsilon"},
+    {"ζ", "zeta"},
+    {"η", "eta"},
+    {"θ", "theta"},
+    {"ι", "iota"},
+    {"κ", "kappa"},
+    {"λ", "lambda"},
+    {"μ", "mu"},
+    {"ν", "nu"},
+    {"ξ", "xi"},
+    {"π", "pi"},
+    {"ρ", "rho"},
+    {"σ", "sigma"},
+    {"τ", "tau"},
+    {"υ", "upsilon"},
+    {"φ", "phi.alt"},
+    {"χ", "chi"},
+    {"ψ", "psi"},
+    {"ω", "omega"},
+    # Greek uppercase
+    {"Γ", "Gamma"},
+    {"Δ", "Delta"},
+    {"Θ", "Theta"},
+    {"Λ", "Lambda"},
+    {"Ξ", "Xi"},
+    {"Π", "Pi"},
+    {"Σ", "Sigma"},
+    {"Υ", "Upsilon"},
+    {"Φ", "Phi"},
+    {"Ψ", "Psi"},
+    {"Ω", "Omega"},
+    # Comparison / relation operators
+    {"≤", " lt.eq "},
+    {"≥", " gt.eq "},
+    {"≠", " eq.not "},
+    {"≈", " approx "},
+    {"≡", " equiv "},
+    {"∝", " prop "},
+    {"∼", " tilde.op "},
+    # Set operators
+    {"∈", " in "},
+    {"∉", " in.not "},
+    {"⊆", " subset.eq "},
+    {"⊂", " subset "},
+    {"⊇", " supset.eq "},
+    {"⊃", " supset "},
+    {"∪", " union "},
+    {"∩", " sect "},
+    # Arrows
+    {"→", " -> "},
+    {"←", " <- "},
+    {"↔", " <-> "},
+    {"⇒", " => "},
+    {"⇔", " <-> "},
+    {"⟹", " => "},
+    {"⟺", " <-> "},
+    # Arithmetic / misc
+    {"±", " plus.minus "},
+    {"×", " times "},
+    {"÷", " div "},
+    {"·", " dot.op "},
+    {"⋅", " dot.op "},
+    # Big operators and other symbols
+    {"∑", "sum"},
+    {"∏", "product"},
+    {"∫", "integral"},
+    {"∬", "integral.double"},
+    {"∭", "integral.triple"},
+    {"∞", "infinity"},
+    {"∂", "partial"},
+    {"∇", "nabla"},
+    {"∀", "forall"},
+    {"∃", "exists"},
+    {"¬", "not"},
+    {"⊥", "perp"},
+    {"∥", "parallel"},
+    {"…", "..."},
+    {"⋯", "..."},
+    {"⋮", "dots.v"},
+    {"⋱", "dots.d"}
+  ]
+
+  defp apply_unicode_math_chars(math) do
+    Enum.reduce(@unicode_math_chars, math, fn {char, typst}, acc ->
+      if String.match?(typst, ~r/^[a-zA-Z]/) do
+        # Alphabetic replacement (Greek letters, big operators like sum/product):
+        # insert a space when directly preceded OR followed by another alphanumeric
+        # so that e.g. `λL` → `lambda L` and `xθ` → `x theta` rather than
+        # `lambdaL` / `xtheta`.
+        pattern = Regex.compile!("([a-zA-Z0-9]?)" <> Regex.escape(char) <> "([a-zA-Z0-9]?)")
+
+        Regex.replace(pattern, acc, fn
+          _, "", "" -> typst
+          _, pre, "" -> "#{pre} #{typst}"
+          _, "", post -> "#{typst} #{post}"
+          _, pre, post -> "#{pre} #{typst} #{post}"
+        end)
+      else
+        # Operator/symbol replacement already carries surrounding spaces.
+        String.replace(acc, char, typst)
+      end
+    end)
+  end
 
   defp apply_latex_commands(math) do
     Enum.reduce(@latex_commands, math, fn {latex, typst}, acc ->
