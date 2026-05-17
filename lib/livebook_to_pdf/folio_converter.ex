@@ -638,7 +638,6 @@ defmodule LivebookToPdf.FolioConverter do
       Folio.Styles.page_margin(top: 71, bottom: 71, left: 85, right: 85),
       Folio.Styles.font_size(11),
       Folio.Styles.par_justify(true),
-      Folio.Styles.page_numbering("1"),
       Folio.Styles.hyphenate(true)
     ]
   end
