@@ -344,8 +344,8 @@ defmodule LivebookToPdf.FolioConverter do
     # ── Bare single-token sub/superscripts: _x → _(x), ^x → ^(x) ────────────
     # LaTeX bare _x subscripts only the first token; Typst treats consecutive
     # letters as one identifier and would subscript them all without parens.
-    |> r.(~r/_([a-zA-Z0-9])/, fn _, c -> "_(#{c})" end)
-    |> r.(~r/\^([a-zA-Z0-9])/, fn _, c -> "^(#{c})" end)
+    |> r.(~r/_([[:alnum:]])/u, fn _, c -> "_(#{c})" end)
+    |> r.(~r/\^([[:alnum:]])/u, fn _, c -> "^(#{c})" end)
     # ── Remaining bare braces (general grouping) → parens ────────────────────
     |> String.replace("{", "(")
     |> String.replace("}", ")")
@@ -430,8 +430,8 @@ defmodule LivebookToPdf.FolioConverter do
     {"\\le", "lt.eq"},
     {"\\geq", "gt.eq"},
     {"\\ge", "gt.eq"},
-    {"\\neq", "eq.not"},
-    {"\\ne", "eq.not"},
+    {"\\neq", "≠"},
+    {"\\ne", "≠"},
     {"\\approx", "approx"},
     {"\\equiv", "equiv"},
     {"\\propto", "prop"},
@@ -453,6 +453,7 @@ defmodule LivebookToPdf.FolioConverter do
     {"\\Leftrightarrow", "arrow.l.r.double"},
     {"\\leftrightarrow", "<->"},
     {"\\Rightarrow", "=>"},
+    {"\\nrightarrow", "↛"},
     {"\\rightarrow", "->"},
     {"\\Leftarrow", "arrow.l.double"},
     {"\\leftarrow", "<-"},
@@ -547,7 +548,7 @@ defmodule LivebookToPdf.FolioConverter do
     # Comparison / relation operators
     {"≤", " lt.eq "},
     {"≥", " gt.eq "},
-    {"≠", " eq.not "},
+    {"≠", " ≠ "},
     {"≈", " approx "},
     {"≡", " equiv "},
     {"∝", " prop "},
@@ -560,7 +561,7 @@ defmodule LivebookToPdf.FolioConverter do
     {"⊇", " supset.eq "},
     {"⊃", " supset "},
     {"∪", " union "},
-    {"∩", " sect "},
+    {"∩", " ∩ "},
     # Arrows
     {"→", " -> "},
     {"←", " <- "},

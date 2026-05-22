@@ -207,5 +207,12 @@ defmodule LivebookToPdfTest do
       assert String.ends_with?(filename, ".svg")
       assert byte_size(bytes) > 0
     end
+
+    test "handles neq, nrightarrow, and unicode single-token subscripts" do
+      math = "$lim_{λ→∞}E_{i,j}[d_λ(\\Xi_i,\\Xi_j)]≠0 \nrightarrow 1$"
+      blocks = [%{type: :markdown, language: nil, content: "# Math\n\n" <> math}]
+
+      assert {:ok, %Folio.Document{}} = FolioConverter.build_document(blocks)
+    end
   end
 end
